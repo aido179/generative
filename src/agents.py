@@ -2,10 +2,14 @@ import random, math, traceback, sys
 import numpy as np
 import cv2
 from src import tools
-from typing import List, Tuple, Any
+from src import brushes
+from typing import Callable, List, Tuple, Any
 
 class Agent:
     def __init__(self) -> None:
+        self.position = (0,0)
+        self.next_position = (0,0)
+        self.position_history: List[Tuple[int, int]] = [self.position]
         self.neighbour_positions = [
                 (0, -1), # north
                 (-1, -1),# nw
@@ -19,13 +23,38 @@ class Agent:
         self.lifespan = 50000
         self.curr_age = 0
         self.aging_rate = 500
+        self.brush:Callable[[np.ndarray, List[Tuple[int, int]]], np.ndarray] = brushes.simpleBorderPolyLine
+
+    def calculateNextPosition(self):
+        return self.position
+
+    def checkDead(self, state:np.ndarray) -> bool:
+        return False
+
+    def doSpawn(self) -> None:
+        pass
+
+    def doDraw(self, state:np.ndarray) -> None:
+        state = self.brush(state, self.position_history)
 
     def doStep(self, step:int, state:np.ndarray, terrain:np.ndarray) -> np.ndarray:
         # 1. Calculate new position
+        self.new_point = self.calculateNextPosition()
         # 2. Check if dead
+        if self.checkDead(state):
+            return state
         # 3. Do spawn
+        self.doSpawn()
         # 4. Do draw
+        self.doDraw(state)
+        # 5. Do step
+        self.position = self.next_position
+        self.position_history.append(self.next_position)
+        self.curr_age += self.aging_rate
+        #self.curr_age += self.aging_rate
+        self.direction_rads = terrain[self.position[0]][self.position[1]]
         return state
+
     def die(self, x:Any=0) -> None:
         self.dead = True
         #print(x)
@@ -188,48 +217,123 @@ class VectorFieldWalker(Agent):
     An agent that follows the vector direction
     """
     def __init__(self, cursor_list:List[Agent], position:Tuple[int, int], magnitude:float=1, direction_rads:float=0):
-        Agent.__init__(self)
+        super().__init__()
         self.cursor_list = cursor_list
         self.position = position
+        self.next_position = position
+        self.position_history: List[Tuple[int, int]] = [position]
 
-        self.color = [0, 0, 255]
-        self.stroke_width = 1
+        self.brush:Callable[[np.ndarray, List[Tuple[int, int]]], np.ndarray] = brushes.simpleBorderPolyLine
 
         self.magnitude=magnitude
         self.direction_rads=direction_rads
 
         self.dead = False
 
-    def doStep(self, step:int, state:np.ndarray, terrain:np.ndarray) -> np.ndarray:
-        # 1. Calculate new position
-        #print(f"dpStep m={self.magnitude}")
+    def calculateNextPosition(self) -> Tuple[int,int]:
         new_point_diff = self.polarToCartesian((self.magnitude, self.direction_rads))
         new_point = self.addPoints(self.position, new_point_diff)
-        # 2. Check if dead
+        return new_point
+
+    def checkDead(self, state:np.ndarray) -> bool:
+        # if too much points (probably in an infinite loop)
+        if len(self.position_history) > 5000:
+            self.die('too big')
+            return True
         # if too old
         if self.curr_age > self.lifespan:
             self.die(1)
-            return state
+            return True
         # if outside the image
         # state.shape is in cv2 [w h] shape. position is in drawing [h w] shape
-        if new_point[0] < 0 or new_point[1] < 0 or new_point[0] >= state.shape[0] or new_point[1] >= state.shape[1]:
-            self.die(2)
+        # if self.next_position[0] < 0 or self.next_position[1] < 0 or self.next_position[0] >= state.shape[0] or self.next_position[1] >= state.shape[1]:
+        #     self.die(2)
+        #     return True
+        return False
+
+    def doDraw(self, state:np.ndarray) -> None:
+        state = self.brush(state, self.position_history)
+
+    def doStep(self, step:int, state:np.ndarray, terrain:np.ndarray) -> np.ndarray:
+        # 1. Calculate new position
+        self.next_position = self.calculateNextPosition()
+        # 2. Check if dead
+        if self.checkDead(state):
             return state
         # 3. Do spawn
-        """ Never spawn """
+        self.doSpawn()
         # 4. Do draw
-        state = cv2.line(state,self.position[::-1],new_point[::-1],self.color,self.stroke_width)
+        self.doDraw(state)
         # 5. Do step
-        self.position = new_point
+        self.position = self.next_position
+        self.position_history.append(self.next_position)
         self.curr_age += self.aging_rate
-        #self.curr_age += self.aging_rate
-        self.direction_rads = terrain[self.position[0]][self.position[1]]
+        try:
+            self.direction_rads = terrain[self.position[0]][self.position[1]]
+        except IndexError:
+            pass
         return state
 
-def VectorFieldWalkerFactory(vectorField:np.ndarray, agent_buffer:List[Agent], count:int) -> List[Agent]:
+class VectorFieldBackwardWalker(VectorFieldWalker):
+    """
+    This is a version of VectorFieldWalker that moves backwards,
+    or 180 offset from the terrain direction.
+
+    It does no drawing, but the position_history is used by a corresponding
+    "front facing" VectorFieldWalker to draw a full line in two directions
+    """
+    def __init__(self, cursor_list:List[Agent], position:Tuple[int, int], partner_walker:VectorFieldWalker, magnitude:float=1, direction_rads:float=0):
+        super().__init__(cursor_list, position, magnitude, direction_rads)
+        self.partner_walker = partner_walker
+
+    def calculateNextPosition(self) -> Tuple[int,int]:
+        new_point_diff = self.polarToCartesian((0-self.magnitude, self.direction_rads))
+        new_point = self.addPoints(self.position, new_point_diff)
+        # Inject my positin into the partner walker's position history
+        self.partner_walker.position_history.insert(0, new_point)
+        return new_point
+
+    def doDraw(self, state):
+        pass
+
+
+def VectorFieldWalkerFactory_1(vectorField:np.ndarray, agent_buffer:List[Agent], count:int) -> List[Agent]:
+    """
+    Create 'count' walkers at random locations
+    """
     shape = vectorField.shape
     for x in range(0, count):
         pos = (random.randrange(shape[0]), random.randrange(shape[1]))
         v = VectorFieldWalker(agent_buffer, pos, 10, vectorField[pos[0]][pos[1]])
         agent_buffer.append(v)
+    return agent_buffer
+
+def VectorFieldWalkerFactory_2(vectorField:np.ndarray, agent_buffer:List[Agent], step:int) -> List[Agent]:
+    """
+    Create walkers at regular locations all over the terrain at 'step' intervals
+    """
+    shape = vectorField.shape
+    for x in range(0, shape[0], step):
+        for y in range(0, shape[1], step):
+            # build the brush function
+
+            v = VectorFieldWalker(agent_buffer, (x, y), 2, vectorField[x][y])
+            bsh = brushes.simpleBorderPolyLine
+            v.brush = bsh
+            agent_buffer.append(v)
+    return agent_buffer
+
+def VectorFieldWalkerFactory_3(vectorField:np.ndarray, agent_buffer:List[Agent], step:int) -> List[Agent]:
+    """
+    Create walkers on a vertical line throught the middle of the terrain
+    """
+    shape = vectorField.shape
+    y = int(shape[1]/2)
+    for x in range(0, shape[0], step):
+        v = VectorFieldWalker(agent_buffer, (x, y), 10, vectorField[x][y])
+        v_back = VectorFieldBackwardWalker(agent_buffer, (x, y), v, 10, vectorField[x][y])
+        bsh = brushes.simpleBorderPolyLine
+        v.brush = bsh
+        agent_buffer.append(v)
+        agent_buffer.append(v_back)
     return agent_buffer

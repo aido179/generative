@@ -11,6 +11,7 @@ from src import tools
 from src import waiter as wait
 from src import noise
 from src import agents
+from src import brushes
 
 """
 V7 - flow paths
@@ -37,7 +38,7 @@ def updateState(step:int, state:StateArray, terrain:StateArray, agent_buffer: Li
     if len(agent_buffer) < 10:
         #agent_buffer.append(Cursor(agent_buffer, (state.shape[1], state.shape[0]))) # must reverse cv2 shape
         #getCrystalAgentsAroundRandomSeedPoint(state.shape[0], state.shape[1], 60, agent_buffer)
-        agent_buffer = agents.VectorFieldWalkerFactory(terrain, agent_buffer, 1)
+        #agent_buffer = agents.VectorFieldWalkerFactory_1(terrain, agent_buffer, 1)
         pass
     for agent in agent_buffer:
         state = agent.doStep(step, state, terrain)
@@ -50,7 +51,10 @@ def updateStateHistory(step:int, every:int, state:StateArray, state_history:List
         state_history.append(state.copy())
     return state_history
 
-def handleEvents(pygame:Any) -> Tuple[bool, bool]:
+def doNothing(t:Tuple[int,int]) -> None:
+    pass
+
+def handleEvents(pygame:Any, mouseCallback:Callable[[Tuple[int,int]],None]=doNothing) -> Tuple[bool, bool]:
     """
     Handles key presses to quit the program
     Returns updated loop control values
@@ -66,12 +70,16 @@ def handleEvents(pygame:Any) -> Tuple[bool, bool]:
                 continue_current_loop = False # gotta leave the inner loop before we can leave the outer one.
             if event.key == 13: #Enter
                 continue_current_loop = False
+        if event.type == pygame.MOUSEBUTTONUP:
+            mouseCallback(pygame.mouse.get_pos())
+
     return (continue_outer_loop, continue_current_loop)
 
 
 MAX_VAL = 255
 
 # CANVAS_H, CANVAS_W = 720, 1280 # overwritten when an image is loaded
+#@profile # for profiling, uncomment this line and run: python -m memory_profiler generator.py
 def main():
     print("Loading...")
     """
@@ -83,11 +91,23 @@ def main():
     steps_per_frame = 1
     image_scale_percent = 15
 
-    noise_arr = noise.generate_perlin_noise_2d((480, 640), (10, 10), tileable=(False, False))
+    noise_arr = noise.generate_perlin_noise_2d((480, 640), (4, 4), tileable=(False, False))
+    print("max", np.amax(noise_arr))
+    print("min", np.amin(noise_arr))
+    noise_arr += abs(noise_arr.min())
+    print("max", np.amax(noise_arr))
+    print("min", np.amin(noise_arr))
     terrain = noise_arr.copy() # keep terrain in 2d format.
-    terrain = ((terrain + 1) * 6) # range 0-255
+    terrain *= (math.pi)/terrain.max() # Normalize/scale values between 0-pi (0-180 degrees in radians)
+                                       # uses 180 degrees because walkers are symmetric (forward and backward)
+    print("max", np.amax(terrain))
+    print("min", np.amin(terrain))
+
     noise_arr = np.stack((noise_arr,)*3, axis=-1) # convert from 2d to 3d
-    noise_arr = (noise_arr + 1) * 128 # range 0-255
+    noise_arr *= 255/noise_arr.max() # Normalize/scale values between 0-255
+
+    print("max", np.amax(noise_arr))
+    print("min", np.amin(noise_arr))
     state = noise_arr.copy()
 
 
@@ -104,8 +124,10 @@ def main():
     #boxels = initBoxelsRandom(CANVAS_H, CANVAS_W)
     state_history = [state]
     agent_buffer:List[agents.Agent] = []
-    #agents.VectorFieldVisualizerFactory(terrain, agent_buffer, 30)
-    agents.VectorFieldWalkerFactory(terrain, agent_buffer, 10)
+    agents.VectorFieldVisualizerFactory(terrain, agent_buffer, 30)
+    #agents.VectorFieldWalkerFactory_1(terrain, agent_buffer, 10)
+    #agents.VectorFieldWalkerFactory_2(terrain, agent_buffer, 100)
+    agents.VectorFieldWalkerFactory_3(terrain, agent_buffer, 30)
     print(f"agents: {len(agent_buffer)}")
 
 
@@ -120,9 +142,17 @@ def main():
         draw_loop = True
         print("Draw loop")
         while draw_loop:
-            outer_loop, draw_loop = handleEvents(pygame)
+            def addAtMouse(mouse_pos:Tuple[int, int]) -> None:
+                y, x = mouse_pos
+                v = agents.VectorFieldWalker(agent_buffer, mouse_pos[::-1], 10, terrain[x][y])
+                v_back = agents.VectorFieldBackwardWalker(agent_buffer, mouse_pos[::-1], v, 10, terrain[x][y])
+                bsh = brushes.simpleBorderPolyLine
+                v.brush = bsh
+                v_back.brush = bsh
+                agent_buffer.append(v)
+                agent_buffer.append(v_back)
+            outer_loop, draw_loop = handleEvents(pygame, mouseCallback=addAtMouse)
             state = updateState(step, state, terrain, agent_buffer)
-
             state_history = updateStateHistory(step, steps_per_frame, state, state_history)
             if step % steps_per_frame == 0:
                 draw(screen, state)
